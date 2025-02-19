@@ -1,93 +1,86 @@
 from datetime import datetime
-from db_connection import db
+import uuid
+from botocore.exceptions import ClientError
+from db_connection import bookings_table
+from models.event import update_ticket_count
 
-bookings_collection = db['bookings']
-events_collection = db["events"]
-seats_collection = db["seats"]
-
-# Create indexes
-def create_indexes():
-    """Create indexes for the bookings collection"""
-    # Index for querying bookings by user_id
-    bookings_collection.create_index("user_id")
-    
-    # Compound index for querying by event_id and status
-    bookings_collection.create_index([("event_id", 1), ("status", 1)])
-    
-    # Index for timestamp to optimize sorting by date
-    bookings_collection.create_index("timestamp")
-
-# Call create_indexes when initializing the application
-create_indexes()
+def generate_booking_id():
+    return f"booking_{str(uuid.uuid4())}"
 
 def create_booking(user_id, event_id, section, quantity, price_per_ticket, event_name, event_location):
-    """Create a new booking without transactions."""
+    """Create a new booking."""
     try:
-        # Check and update event tickets atomically
-        event_update_result = events_collection.update_one(
-            {"_id": event_id, "available_tickets": {"$gte": quantity}},  # Ensure enough tickets are available
-            {
-                "$inc": {
-                    "available_tickets": -quantity,
-                    "sold_tickets": quantity
-                }
-            }
-        )
+        # First, try to update the event tickets
+        if not update_ticket_count(event_id, quantity, "sold"):
+            return {"error": "Not enough tickets available"}
 
-        if event_update_result.modified_count == 0:
-            return {"error": "Not enough tickets available for the event."}
-
-        # Check and update seat tickets atomically
-        seat_update_result = seats_collection.update_one(
-            {"_id": f"seat_section_{event_id}_{section}", "available_tickets": {"$gte": quantity}},
-            {
-                "$inc": {
-                    "available_tickets": -quantity,
-                    "sold_tickets": quantity
-                }
-            }
-        )
-
-        if seat_update_result.modified_count == 0:
-            # Rollback event update if seat section fails
-            events_collection.update_one(
-                {"_id": event_id},
-                {
-                    "$inc": {
-                        "available_tickets": quantity,
-                        "sold_tickets": -quantity
-                    }
-                }
-            )
-            return {"error": "Not enough tickets available in the seat section."}
-
-        # Insert booking document
+        # Create the booking
+        booking_id = generate_booking_id()
         booking = {
-            "_id": f"booking_{event_id}_{user_id}_{section}_{datetime.now().timestamp()}",
-            "user_id": user_id,
-            "event_id": event_id,
-            "status": "completed",
-            "timestamp": datetime.now().isoformat(),
-            "total_price": price_per_ticket * quantity,
-            "seat_details": [{
-                "section": section,
-                "tickets_booked": quantity,
-                "price_per_ticket": price_per_ticket
-            }],
-            "event_name": event_name,
-            "event_location": event_location
+            'booking_id': booking_id,
+            'user_id': user_id,
+            'event_id': event_id,
+            'status': 'completed',
+            'timestamp': datetime.now().isoformat(),
+            'total_price': price_per_ticket * quantity,
+            'seat_details': {
+                'section': section,
+                'tickets_booked': quantity,
+                'price_per_ticket': price_per_ticket
+            },
+            'event_name': event_name,
+            'event_location': event_location
         }
-        bookings_collection.insert_one(booking)
-
+        
+        bookings_table.put_item(Item=booking)
         return {"success": "Booking successful"}
-    except Exception as e:
-        print(f"Booking error: {str(e)}")
+            
+    except ClientError as e:
+        # If booking fails, try to rollback the ticket count
+        update_ticket_count(event_id, quantity, "refund")
+        print(f"Error creating booking: {str(e)}")
         return {"error": str(e)}
 
 def get_user_bookings(user_id):
-    """Get all bookings for a specific user"""
+    """Get all bookings for a specific user."""
     try:
-        return list(bookings_collection.find({"user_id": user_id}))
-    except Exception as e:
-        print(f"Error fetching user bookings: {str(e)}")
+        response = bookings_table.query(
+            IndexName='UserBookingsIndex',
+            KeyConditionExpression='user_id = :uid',
+            ExpressionAttributeValues={
+                ':uid': user_id
+            }
+        )
+        return response.get('Items', [])
+    except ClientError as e:
+        print(f"Error retrieving user bookings: {str(e)}")
         return []
+
+def get_booking_by_id(booking_id):
+    """Get a specific booking by ID."""
+    try:
+        response = bookings_table.get_item(
+            Key={'booking_id': booking_id}
+        )
+        return response.get('Item')
+    except ClientError as e:
+        print(f"Error retrieving booking: {str(e)}")
+        return None
+
+def update_booking_status(booking_id, new_status):
+    """Update the status of a booking."""
+    try:
+        bookings_table.update_item(
+            Key={'booking_id': booking_id},
+            UpdateExpression='SET #status = :status',
+            ExpressionAttributeNames={
+                '#status': 'status'  # status is a reserved word in DynamoDB
+            },
+            ExpressionAttributeValues={
+                ':status': new_status
+            }
+        )
+        return True
+    except ClientError as e:
+        print(f"Error updating booking status: {str(e)}")
+        return False

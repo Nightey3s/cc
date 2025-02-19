@@ -1,38 +1,93 @@
 from datetime import datetime
-from db_connection import users_collection 
-from bson import ObjectId
-from pymongo.errors import DuplicateKeyError
+import uuid
+from botocore.exceptions import ClientError
+from db_connection import users_table
+
+def generate_user_id():
+    return f"user_{str(uuid.uuid4())}"
 
 def create_user(name, email, password):
-    """Create a new user in the database."""
-    user = {
-        "name": name,
-        "email": email,
-        "password": password,
-        "created_at": datetime.now().isoformat(),
-    }
+    """Create a new user in DynamoDB."""
     try:
-        result = users_collection.insert_one(user)
-        return {"status": "success", "user_id": str(result.inserted_id)}
-    except DuplicateKeyError:
-        return {"status": "error", "message": "Email already exists"} 
-    
-def user_login(email,password):
-    user_data = users_collection.find_one({"email": email})
-    if user_data and user_data['password'] == password:
-        return user_data  # Return user data if login is successful
-    
-# models/user.py
+        # Check if email exists using GSI
+        response = users_table.query(
+            IndexName='EmailIndex',
+            KeyConditionExpression='email = :email',
+            ExpressionAttributeValues={
+                ':email': email
+            }
+        )
+        
+        if response['Items']:
+            return {"status": "error", "message": "Email already exists"}
+
+        user_id = generate_user_id()
+        user = {
+            'user_id': user_id,
+            'name': name,
+            'email': email,
+            'password': password,  # In production, ensure this is hashed
+            'created_at': datetime.now().isoformat()
+        }
+        
+        users_table.put_item(Item=user)
+        return {"status": "success", "user_id": user_id}
+    except ClientError as e:
+        print(f"Error creating user: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+def user_login(email, password):
+    """Verify user login credentials."""
+    try:
+        response = users_table.query(
+            IndexName='EmailIndex',
+            KeyConditionExpression='email = :email',
+            ExpressionAttributeValues={
+                ':email': email
+            }
+        )
+        
+        if not response['Items']:
+            return None
+            
+        user = response['Items'][0]
+        if user['password'] == password:  # In production, use proper password verification
+            return user
+        return None
+    except ClientError as e:
+        print(f"Error during login: {str(e)}")
+        return None
+
 def update_user_profile(user_id, name, email):
-    """Update user profile information in the database."""
-    users_collection.update_one(
-        {"_id": ObjectId(user_id)},
-        {"$set": {
-            "name": name,
-            "email": email,
-        }}
-    )
+    """Update user profile information."""
+    try:
+        users_table.update_item(
+            Key={'user_id': user_id},
+            UpdateExpression='SET #name = :name, email = :email',
+            ExpressionAttributeNames={
+                '#name': 'name'  # 'name' is a reserved word in DynamoDB
+            },
+            ExpressionAttributeValues={
+                ':name': name,
+                ':email': email
+            }
+        )
+        return True
+    except ClientError as e:
+        print(f"Error updating user profile: {str(e)}")
+        return False
 
 def is_email_used(email):
-    """Check if the email is already registered in the database."""
-    return users_collection.find_one({"email": email})
+    """Check if the email is already registered."""
+    try:
+        response = users_table.query(
+            IndexName='EmailIndex',
+            KeyConditionExpression='email = :email',
+            ExpressionAttributeValues={
+                ':email': email
+            }
+        )
+        return len(response['Items']) > 0
+    except ClientError as e:
+        print(f"Error checking email: {str(e)}")
+        return False
