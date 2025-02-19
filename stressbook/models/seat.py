@@ -1,6 +1,7 @@
 from datetime import datetime
-from botocore.exceptions import ClientError
 from db_connection import seats_table, events_table
+from botocore.exceptions import ClientError
+import uuid
 
 # Predefined seat sections with their configurations
 seat_sections = [
@@ -82,33 +83,25 @@ seat_sections = [
 ]
 
 def initialize_seat_sections():
-    """Initialize seat sections for all events."""
+    """Initialize seat sections for all events"""
     try:
+        print("Starting seat initialization...")
         # Get all events
         response = events_table.scan()
         events = response.get('Items', [])
+        print(f"Found {len(events)} events to initialize seats for")
         
         for event in events:
             event_id = event['event_id']
+            print(f"Initializing seats for event: {event_id}")
             
-            # Check if seats exist for this event
-            existing_seats = seats_table.query(
-                KeyConditionExpression='event_id = :eid',
-                ExpressionAttributeValues={
-                    ':eid': event_id
-                }
-            )
-            
-            if existing_seats.get('Items'):
-                print(f"Seats already initialized for event {event_id}, skipping.")
-                continue
-            
-            # Initialize seats for this event
+            # Initialize seats for each section
             for section in seat_sections:
+                seat_id = f"seat_section_{event_id}_{section['section']}"
                 seat_item = {
+                    'seat_id': seat_id,
                     'event_id': event_id,
-                    'section_id': section['section'],
-                    'description': f"{section['section']} section in event {event_id}",
+                    'section': section['section'],
                     'price': section['price'],
                     'available_tickets': section['capacity_limit'],
                     'reserved_tickets': 0,
@@ -118,60 +111,46 @@ def initialize_seat_sections():
                     'capacity_limit': section['capacity_limit']
                 }
                 
-                seats_table.put_item(Item=seat_item)
-                
-            print(f"Initialized {len(seat_sections)} seat sections for event {event_id}")
-            
+                try:
+                    seats_table.put_item(Item=seat_item)
+                    print(f"Created seat section: {seat_id}")
+                except ClientError as e:
+                    print(f"Error creating seat section {seat_id}: {e}")
+                    
+        print("Seat initialization completed")
+        return True
     except ClientError as e:
-        print(f"Error initializing seat sections: {str(e)}")
+        print(f"Error in seat initialization: {e}")
+        return False
 
 def update_seat_count(event_id, section, quantity):
     """Update seat availability atomically."""
     try:
+        seat_id = f"seat_section_{event_id}_{section}"
         response = seats_table.update_item(
-            Key={
-                'event_id': event_id,
-                'section_id': section
-            },
-            UpdateExpression='SET available_tickets = available_tickets - :qty, '
-                           'reserved_tickets = reserved_tickets + :qty',
+            Key={'seat_id': seat_id},
+            UpdateExpression='SET available_tickets = available_tickets - :qty, sold_tickets = sold_tickets + :qty',
             ConditionExpression='available_tickets >= :qty',
-            ExpressionAttributeValues={
-                ':qty': quantity
-            },
+            ExpressionAttributeValues={':qty': quantity},
             ReturnValues='UPDATED_NEW'
         )
         return True
     except ClientError as e:
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
             return False
-        print(f"Error updating seat count: {str(e)}")
+        print(f"Error updating seat count: {e}")
         return False
 
-def get_section_availability(event_id, section):
-    """Get availability for a specific section."""
-    try:
-        response = seats_table.get_item(
-            Key={
-                'event_id': event_id,
-                'section_id': section
-            }
-        )
-        return response.get('Item')
-    except ClientError as e:
-        print(f"Error getting section availability: {str(e)}")
-        return None
-
-def get_all_sections_for_event(event_id):
-    """Get all seat sections for an event."""
+def get_seat_availability(event_id):
+    """Get seat availability for an event"""
     try:
         response = seats_table.query(
+            IndexName='event_id_index',
             KeyConditionExpression='event_id = :eid',
-            ExpressionAttributeValues={
-                ':eid': event_id
-            }
+            ExpressionAttributeValues={':eid': event_id}
         )
         return response.get('Items', [])
     except ClientError as e:
-        print(f"Error getting event sections: {str(e)}")
+        print(f"Error getting seat availability: {e}")
         return []
+

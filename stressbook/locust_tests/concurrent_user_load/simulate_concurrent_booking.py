@@ -62,21 +62,30 @@ class ConcertBookingUser(HttpUser):
     @task(5)
     def book_ticket(self):
         """Simulate booking tickets."""
-        event = random.choice(EVENTS)
-        seat = random.choice(SEAT_SECTIONS)
-        quantity = random.randint(1, 4)  # Random quantity between 1 and 5
+        try:
+            event = random.choice(EVENTS)
+            seat = random.choice(SEAT_SECTIONS)
+            quantity = random.randint(1, 4)
 
-        response = self.client.post("/booking/process", data={
-            "event_id": event["event_id"],
-            "section": seat["section"],
-            "quantity": quantity,
-            "price": seat["price"]
-        })
-
-        if response.status_code == 200 and "Booking successful" in response.text:
-            print(f"Successfully booked {quantity} ticket(s) for {event['name']}, section {seat['section']}.")
-        else:
-            print(f"Failed to book ticket(s) for {event['name']}, section {seat['section']}.")
+            with self.client.post("/booking/process", 
+                data={
+                    "event_id": event["event_id"],
+                    "section": seat["section"],
+                    "quantity": quantity,
+                    "price": seat["price"]
+                },
+                catch_response=True) as response:
+                
+                if response.status_code == 200:
+                    if "Booking successful" in response.text:
+                        response.success()
+                        print(f"Successfully booked {quantity} ticket(s) for {event['name']}")
+                    else:
+                        response.failure("Booking failed - no success message")
+                else:
+                    response.failure(f"Booking failed with status {response.status_code}")
+        except Exception as e:
+            print(f"Error in book_ticket task: {e}")
 
     @task(1)
     def view_booking(self):

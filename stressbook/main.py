@@ -5,8 +5,8 @@ from utils import login_required  # Remove the dot for direct import
 from models import booking as booking_model
 
 app = Flask(__name__)
-app.secret_key = "your_secret_key"  # Replace with a strong secret key
 # Pass the db instance to the models
+app.secret_key = 'your-super-secret-key'  # For development
 
 @app.route('/')
 def index():
@@ -58,7 +58,7 @@ def login_account():
         if user_data:
             # If login is successful, set session variables
             session['logged_in'] = True
-            session['user_id'] = str(user_data['_id'])
+            session['user_id'] = str(user_data['user_id'])
             session['user_email'] = user_data['email']
             session['name'] = user_data['name']
             flash("Logged in successfully!", "success")
@@ -239,7 +239,4 @@ if __name__ == "__main__":
     event_model.reset_events()
     event_model.create_events_onload()
     seat.initialize_seat_sections()
-    # Initialize indexes
-    from models.booking import create_indexes
-    create_indexes()
     app.run(debug=True,threaded=True)

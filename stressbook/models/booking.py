@@ -1,21 +1,16 @@
 from datetime import datetime
-import uuid
+from db_connection import dynamodb, BOOKINGS_TABLE, EVENTS_TABLE
 from botocore.exceptions import ClientError
-from db_connection import bookings_table
-from models.event import update_ticket_count
+import uuid
 
-def generate_booking_id():
-    return f"booking_{str(uuid.uuid4())}"
+# Instead, just get the table reference
+bookings_table = dynamodb.Table(BOOKINGS_TABLE)
+events_table = dynamodb.Table(EVENTS_TABLE)
 
 def create_booking(user_id, event_id, section, quantity, price_per_ticket, event_name, event_location):
-    """Create a new booking."""
+    """Create a new booking using DynamoDB transactions"""
     try:
-        # First, try to update the event tickets
-        if not update_ticket_count(event_id, quantity, "sold"):
-            return {"error": "Not enough tickets available"}
-
-        # Create the booking
-        booking_id = generate_booking_id()
+        booking_id = str(uuid.uuid4())
         booking = {
             'booking_id': booking_id,
             'user_id': user_id,
@@ -25,62 +20,49 @@ def create_booking(user_id, event_id, section, quantity, price_per_ticket, event
             'total_price': price_per_ticket * quantity,
             'seat_details': {
                 'section': section,
-                'tickets_booked': quantity,
+                'quantity': quantity,
                 'price_per_ticket': price_per_ticket
             },
             'event_name': event_name,
             'event_location': event_location
         }
-        
-        bookings_table.put_item(Item=booking)
-        return {"success": "Booking successful"}
-            
+
+        # Use DynamoDB transactions
+        response = dynamodb.transact_write_items(
+            TransactItems=[
+                {
+                    'Put': {
+                        'TableName': bookings_table.name,
+                        'Item': booking,
+                        'ConditionExpression': 'attribute_not_exists(booking_id)'
+                    }
+                },
+                {
+                    'Update': {
+                        'TableName': events_table.name,
+                        'Key': {'event_id': event_id},
+                        'UpdateExpression': 'SET available_tickets = available_tickets - :qty, sold_tickets = sold_tickets + :qty',
+                        'ConditionExpression': 'available_tickets >= :qty',
+                        'ExpressionAttributeValues': {':qty': quantity}
+                    }
+                }
+            ]
+        )
+        return {"success": True, "booking_id": booking_id}
     except ClientError as e:
-        # If booking fails, try to rollback the ticket count
-        update_ticket_count(event_id, quantity, "refund")
-        print(f"Error creating booking: {str(e)}")
+        if e.response['Error']['Code'] == 'TransactionCanceledException':
+            return {"error": "Not enough tickets available"}
         return {"error": str(e)}
 
 def get_user_bookings(user_id):
-    """Get all bookings for a specific user."""
+    """Get all bookings for a specific user"""
     try:
         response = bookings_table.query(
-            IndexName='UserBookingsIndex',
+            IndexName='user_id_index',
             KeyConditionExpression='user_id = :uid',
-            ExpressionAttributeValues={
-                ':uid': user_id
-            }
+            ExpressionAttributeValues={':uid': user_id}
         )
         return response.get('Items', [])
     except ClientError as e:
-        print(f"Error retrieving user bookings: {str(e)}")
+        print(f"Error fetching user bookings: {e}")
         return []
-
-def get_booking_by_id(booking_id):
-    """Get a specific booking by ID."""
-    try:
-        response = bookings_table.get_item(
-            Key={'booking_id': booking_id}
-        )
-        return response.get('Item')
-    except ClientError as e:
-        print(f"Error retrieving booking: {str(e)}")
-        return None
-
-def update_booking_status(booking_id, new_status):
-    """Update the status of a booking."""
-    try:
-        bookings_table.update_item(
-            Key={'booking_id': booking_id},
-            UpdateExpression='SET #status = :status',
-            ExpressionAttributeNames={
-                '#status': 'status'  # status is a reserved word in DynamoDB
-            },
-            ExpressionAttributeValues={
-                ':status': new_status
-            }
-        )
-        return True
-    except ClientError as e:
-        print(f"Error updating booking status: {str(e)}")
-        return False
